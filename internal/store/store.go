@@ -69,16 +69,21 @@ const maxURLs = 10
 
 func (s *Store) List(ctx context.Context) ([]ShortURL, error) {
 	ch := make(chan ShortURL)
+	var errorList []error
 	go s.walk(ctx, ch)
 	var urls []ShortURL
 	for e := range ch {
 		if e.Err != nil {
-			return urls, e.Err
+			errorList = append(errorList, e.Err)
 		}
 		urls = append(urls, e)
 		if len(urls) >= maxURLs {
 			break
 		}
+	}
+	finalError := errors.Join(errorList...)
+	if finalError != nil {
+		return nil, finalError
 	}
 	return urls, nil
 }
@@ -109,9 +114,7 @@ func (s *Store) Lookup(_ context.Context, short string) (string, error) {
 		return "", ErrNotFound
 	}
 	if err != nil {
-
-		s.logger.Error(fmt.Sprintf("failed to read %s: %v\n", shortcodeFilepath, err))
-		return "", err
+		return "", fmt.Errorf(" read %s: %w", shortcodeFilepath, err)
 	}
 	return string(data), nil
 }

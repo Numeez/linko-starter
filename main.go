@@ -13,10 +13,20 @@ import (
 	"syscall"
 	"time"
 
+	"boot.dev/linko/internal"
 	"boot.dev/linko/internal/store"
+	pkgerr "github.com/pkg/errors"
 )
 
 type closeFunc func() error
+type stackTracer interface {
+	error
+	StackTrace() pkgerr.StackTrace
+}
+type multiError interface {
+	error
+	Unwrap() []error
+}
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -88,13 +98,36 @@ func initializeLogger(logFile string) (*slog.Logger, func() error, error) {
 		return nil
 	}
 	infoHandler := slog.NewJSONHandler(writer, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level:       slog.LevelInfo,
+		ReplaceAttr: replaceAttr,
 	})
 	debugHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level:       slog.LevelDebug,
+		ReplaceAttr: replaceAttr,
 	})
 	errorHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelError,
+		Level:       slog.LevelError,
+		ReplaceAttr: replaceAttr,
 	})
 	return slog.New(slog.NewMultiHandler(infoHandler, debugHandler, errorHandler)), close, nil
+}
+
+func replaceAttr(groups []string, a slog.Attr) slog.Attr {
+	if a.Key == "error" {
+		err, ok := a.Value.Any().(multiError)
+		if ok {
+			var errAttrs []slog.Attr
+			for i, err := range err.Unwrap() {
+				errAttrs = append(errAttrs, slog.String(fmt.Sprintf("error_%d", i+1), err.Error()))
+			}
+			return slog.GroupAttrs("errors", errAttrs...)
+		}
+		if _, ok := errors.AsType[stackTracer](err); ok {
+			errorAttributes := internal.Attrs(err)
+			return slog.GroupAttrs("error", errorAttributes...)
+		}
+		return slog.String("error", fmt.Sprintf("%+v", err))
+	}
+	return a
+
 }
