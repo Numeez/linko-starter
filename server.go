@@ -73,10 +73,15 @@ func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 			logContext := context.WithValue(r.Context(), logContextKey, &LogContext{})
 			r = r.WithContext(logContext)
 			next.ServeHTTP(trackerResponseWriter, r)
+			clientIp, err := redactIp(r.RemoteAddr)
+			logger.Debug("fetching clientIp from redactIp failed", []slog.Attr{
+				slog.Any("error", err),
+			},
+			)
 			attrs := []any{
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
-				slog.String("client_ip", r.RemoteAddr),
+				slog.String("client_ip", clientIp),
 				slog.Duration("duration", time.Since(start)),
 				slog.Int("request_body_bytes", trackerReadeCloser.bytesRead),
 				slog.Int("response_body_bytes", trackerResponseWriter.bytesWritten),
@@ -150,4 +155,22 @@ func (s *server) handlerShutdown(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	go s.cancel()
+}
+
+func redactIp(address string) (string, error) {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", err
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return "", fmt.Errorf("invalid IP")
+	}
+
+	if ipv4 := ip.To4(); ipv4 != nil {
+		return fmt.Sprintf("%d.%d.x.x", ipv4[0], ipv4[1]), nil
+	}
+
+	return "ipv6_redacted", nil
 }

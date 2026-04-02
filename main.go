@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
@@ -129,6 +130,10 @@ func initializeLogger(logFile string) (*slog.Logger, closeFunc, error) {
 }
 
 func replaceAttr(groups []string, a slog.Attr) slog.Attr {
+	var sensitiveKeys = []string{"password", "key", "apikey", "secret", "pin", "creditcardno", "username"}
+	if slices.Contains(sensitiveKeys, a.Key) {
+		return slog.String(a.Key, "[REDACTED]")
+	}
 	if a.Key == "error" {
 		err, ok := a.Value.Any().(multiError)
 		if ok {
