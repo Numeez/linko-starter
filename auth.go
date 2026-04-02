@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/pkg/errors"
 	pkgerr "github.com/pkg/errors"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -25,12 +26,12 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		username, password, ok := r.BasicAuth()
 		if !ok {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			httpError(r.Context(), w, http.StatusUnauthorized, errors.New("basic auth failed"))
 			return
 		}
 		stored, exists := allowedUsers[username]
 		if !exists {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			httpError(r.Context(), w, http.StatusUnauthorized, errors.New("user does not exists"))
 			return
 		}
 		ok, err := s.validatePassword(password, stored)
@@ -38,14 +39,19 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 			s.logger.Error("error validating password for user",
 				slog.String("user", username),
 				slog.String("error", err.Error()))
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			httpError(r.Context(), w, http.StatusUnauthorized, err)
 			return
 		}
 
 		if !ok {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			httpError(r.Context(), w, http.StatusUnauthorized, errors.New("incorrect password"))
 			return
 		}
+		contextValue, ok := r.Context().Value(logContextKey).(*LogContext)
+		if !ok {
+			s.logger.Debug("context value is not of LogContext type")
+		}
+		contextValue.Username = username
 		r = r.WithContext(context.WithValue(r.Context(), UserContextKey, username))
 		next.ServeHTTP(w, r)
 	})
@@ -61,4 +67,11 @@ func (s *server) validatePassword(password, stored string) (bool, error) {
 		return false, pkgerr.WithStack(err)
 	}
 	return true, nil
+}
+
+func httpError(ctx context.Context, w http.ResponseWriter, status int, err error) {
+	if logCtx, ok := ctx.Value(logContextKey).(*LogContext); ok {
+		logCtx.Error = err
+	}
+	http.Error(w, err.Error(), status)
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"boot.dev/linko/internal/store"
 )
@@ -19,15 +21,82 @@ type server struct {
 	logger     *slog.Logger
 }
 
+type trackReadCloser struct {
+	io.ReadCloser
+	bytesRead int
+}
+
+func (r *trackReadCloser) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	r.bytesRead += n
+	return n, err
+}
+
+type trackResponseWriter struct {
+	http.ResponseWriter
+	bytesWritten int
+	statusCode   int
+}
+
+func (rw *trackResponseWriter) Write(p []byte) (int, error) {
+	if rw.statusCode == 0 {
+		rw.statusCode = http.StatusOK
+	}
+	n, err := rw.ResponseWriter.Write(p)
+	rw.bytesWritten += n
+	return n, err
+}
+
+func (rw *trackResponseWriter) WriteHeader(statusCode int) {
+	rw.statusCode = statusCode
+	rw.ResponseWriter.WriteHeader(statusCode)
+}
+
+const logContextKey contextKey = "log_context"
+
+type LogContext struct {
+	Username string
+	Error    error
+}
+
 func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			next.ServeHTTP(w, r)
-			logger.Info("Served request",
+			start := time.Now()
+			trackerReadeCloser := &trackReadCloser{
+				ReadCloser: r.Body,
+			}
+			trackerResponseWriter := &trackResponseWriter{
+				ResponseWriter: w,
+			}
+			r.Body = trackerReadeCloser
+			logContext := context.WithValue(r.Context(), logContextKey, &LogContext{})
+			r = r.WithContext(logContext)
+			next.ServeHTTP(trackerResponseWriter, r)
+			attrs := []any{
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.String("client_ip", r.RemoteAddr),
-			)
+				slog.Duration("duration", time.Since(start)),
+				slog.Int("request_body_bytes", trackerReadeCloser.bytesRead),
+				slog.Int("response_body_bytes", trackerResponseWriter.bytesWritten),
+				slog.Int("response_status", trackerResponseWriter.statusCode),
+			}
+			logContextValue, ok := r.Context().Value(logContextKey).(*LogContext)
+			if ok {
+				username := logContextValue.Username
+				if username != "" {
+					attrs = append(attrs, slog.String("username", username))
+				}
+				logContextError := logContextValue.Error
+				if logContextError != nil {
+					attrs = append(attrs, slog.Any("ERROR", logContextError.Error()))
+				}
+			}
+			requestId := trackerResponseWriter.ResponseWriter.Header().Get("X-Request-ID")
+			attrs = append(attrs, slog.String("request_id", requestId))
+			logger.Info("Served request", attrs...)
+
 		})
 	}
 }
@@ -36,7 +105,7 @@ func newServer(store store.Store, port int, cancel context.CancelFunc, logger *s
 	mux := http.NewServeMux()
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
-		Handler: mux,
+		Handler: requestIdMiddleware(requestLogger(logger)(mux)),
 	}
 
 	s := &server{
@@ -46,10 +115,10 @@ func newServer(store store.Store, port int, cancel context.CancelFunc, logger *s
 		logger:     logger,
 	}
 
-	mux.Handle("GET /", requestLogger(s.logger)(http.HandlerFunc(s.handlerIndex)))
+	mux.Handle("GET /", http.HandlerFunc(s.handlerIndex))
 	mux.Handle("POST /api/login", s.authMiddleware(http.HandlerFunc(s.handlerLogin)))
 	mux.Handle("POST /api/shorten", s.authMiddleware(http.HandlerFunc(s.handlerShortenLink)))
-	mux.Handle("GET /api/stats", requestLogger(s.logger)(s.authMiddleware(http.HandlerFunc(s.handlerStats))))
+	mux.Handle("GET /api/stats", s.authMiddleware(http.HandlerFunc(s.handlerStats)))
 	mux.Handle("GET /api/urls", s.authMiddleware(http.HandlerFunc(s.handlerListURLs)))
 	mux.HandleFunc("GET /{shortCode}", s.handlerRedirect)
 	mux.HandleFunc("POST /admin/shutdown", s.handlerShutdown)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"boot.dev/linko/internal"
+	"boot.dev/linko/internal/build"
 	"boot.dev/linko/internal/store"
 	pkgerr "github.com/pkg/errors"
 )
@@ -83,6 +84,9 @@ func initializeLogger(logFile string) (*slog.Logger, func() error, error) {
 		return nil, func() error { return nil }, errors.New("empty log file name")
 	}
 	file, err := os.OpenFile(logFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, func() error { return nil }, err
+	}
 	bufferedWriter := bufio.NewWriterSize(file, 8192)
 	if err != nil {
 		return nil, func() error { return nil }, err
@@ -109,7 +113,16 @@ func initializeLogger(logFile string) (*slog.Logger, func() error, error) {
 		Level:       slog.LevelError,
 		ReplaceAttr: replaceAttr,
 	})
-	return slog.New(slog.NewMultiHandler(infoHandler, debugHandler, errorHandler)), close, nil
+	hostname, err := os.Hostname()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "erorr fetching hostname: +%v\n", err)
+	}
+	logger := slog.New(slog.NewMultiHandler(infoHandler, debugHandler, errorHandler))
+	logger = logger.With(slog.String("git_sha", build.GitSHA),
+		slog.String("build_time", build.BuildTime),
+		slog.String("environment", os.Getenv("ENV")),
+		slog.String("hostname", hostname))
+	return logger, close, nil
 }
 
 func replaceAttr(groups []string, a slog.Attr) slog.Attr {
