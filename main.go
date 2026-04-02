@@ -1,20 +1,21 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/lmittmann/tint"
+	"github.com/mattn/go-isatty"
+	"gopkg.in/natefinch/lumberjack.v2"
+
 	"boot.dev/linko/internal"
-	"boot.dev/linko/internal/build"
 	"boot.dev/linko/internal/store"
 	pkgerr "github.com/pkg/errors"
 )
@@ -79,50 +80,52 @@ func run(ctx context.Context, cancel context.CancelFunc, httpPort int, dataDir s
 	return 0
 }
 
-func initializeLogger(logFile string) (*slog.Logger, func() error, error) {
-	if logFile == "" {
-		return nil, func() error { return nil }, errors.New("empty log file name")
-	}
-	file, err := os.OpenFile(logFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
-	if err != nil {
-		return nil, func() error { return nil }, err
-	}
-	bufferedWriter := bufio.NewWriterSize(file, 8192)
-	if err != nil {
-		return nil, func() error { return nil }, err
-	}
-	writer := io.MultiWriter(bufferedWriter, os.Stderr)
-	close := func() error {
-		if err := bufferedWriter.Flush(); err != nil {
-			return err
-		}
-		if err := file.Close(); err != nil {
-			return err
-		}
-		return nil
-	}
-	infoHandler := slog.NewJSONHandler(writer, &slog.HandlerOptions{
-		Level:       slog.LevelInfo,
+func initializeLogger(logFile string) (*slog.Logger, closeFunc, error) {
+	var (
+		handlers []slog.Handler
+		closers  []closeFunc
+	)
+
+	handlers = append(handlers, tint.NewHandler(os.Stderr, &tint.Options{
 		ReplaceAttr: replaceAttr,
-	})
-	debugHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level:       slog.LevelDebug,
+		NoColor:     !(isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd())),
+	}))
+	handlers = append(handlers, tint.NewHandler(os.Stderr, &tint.Options{
 		ReplaceAttr: replaceAttr,
-	})
-	errorHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level:       slog.LevelError,
-		ReplaceAttr: replaceAttr,
-	})
-	hostname, err := os.Hostname()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "erorr fetching hostname: +%v\n", err)
+		NoColor:     !(isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd())),
+	}))
+
+	if logFile != "" {
+		logger := &lumberjack.Logger{
+			Filename:   logFile,
+			MaxSize:    1,
+			MaxAge:     28,
+			MaxBackups: 10,
+			LocalTime:  false,
+			Compress:   true,
+		}
+		handlers = append(handlers, slog.NewJSONHandler(logger, &slog.HandlerOptions{
+			ReplaceAttr: replaceAttr,
+			Level:       slog.LevelInfo,
+		}))
+		closers = append(closers, func() error {
+			if err := logger.Close(); err != nil {
+				return err
+			}
+			return nil
+		})
 	}
-	logger := slog.New(slog.NewMultiHandler(infoHandler, debugHandler, errorHandler))
-	logger = logger.With(slog.String("git_sha", build.GitSHA),
-		slog.String("build_time", build.BuildTime),
-		slog.String("environment", os.Getenv("ENV")),
-		slog.String("hostname", hostname))
-	return logger, close, nil
+
+	close := func() error {
+		var errs []error
+		for _, closer := range closers {
+			errs = append(errs, closer())
+		}
+		return errors.Join(errs...)
+	}
+	return slog.New(slog.NewMultiHandler(handlers...)), close, nil
 }
 
 func replaceAttr(groups []string, a slog.Attr) slog.Attr {
@@ -142,5 +145,25 @@ func replaceAttr(groups []string, a slog.Attr) slog.Attr {
 		return slog.String("error", fmt.Sprintf("%+v", err))
 	}
 	return a
+
+}
+
+func getTintOptions(level slog.Leveler, replaceAttr func(groups []string, attr slog.Attr) slog.Attr, isFile bool) *tint.Options {
+	if isFile {
+		return &tint.Options{
+			Level:       level,
+			ReplaceAttr: replaceAttr,
+			NoColor:     true,
+		}
+
+	}
+	options := &tint.Options{
+		Level:       level,
+		ReplaceAttr: replaceAttr,
+	}
+	if isatty.IsCygwinTerminal(os.Stderr.Fd()) {
+		options.NoColor = true
+	}
+	return options
 
 }
