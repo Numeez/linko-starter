@@ -14,12 +14,19 @@ import (
 
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-isatty"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"boot.dev/linko/internal"
 	"boot.dev/linko/internal/store"
 	pkgerr "github.com/pkg/errors"
 )
+
+var tracer trace.Tracer
 
 type closeFunc func() error
 type stackTracer interface {
@@ -45,6 +52,17 @@ func main() {
 
 func run(ctx context.Context, cancel context.CancelFunc, httpPort int, dataDir string) int {
 	logFile := os.Getenv("LINKO_LOG_FILE")
+	shutDownTracing, err := initTracing(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize tracing: %v\n", err)
+		return 1
+	}
+	defer func(ctx context.Context) {
+		err := shutDownTracing(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to shutdown tracing: %v\n", err)
+		}
+	}(ctx)
 	logger, close, err := initializeLogger(logFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
@@ -171,4 +189,22 @@ func getTintOptions(level slog.Leveler, replaceAttr func(groups []string, attr s
 	}
 	return options
 
+}
+
+func initTracing(ctx context.Context) (func(context.Context) error, error) {
+	exp, err := otlptracegrpc.New(ctx, otlptracegrpc.WithEndpoint("localhost:4317"))
+	if err != nil {
+		return nil, err
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exp,
+			sdktrace.WithBatchTimeout(2*time.Second),
+		),
+		sdktrace.WithResource(resource.Default()),
+	)
+
+	otel.SetTracerProvider(tp)
+	tracer = tp.Tracer("boot.dev/linko")
+	return tp.Shutdown, nil
 }
