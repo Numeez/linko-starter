@@ -3,3 +3,6 @@ linko
 *~
 vendor/
 *.log
+memory.*
+cpu.*
+*.sh

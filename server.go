@@ -122,8 +122,8 @@ func newServer(store store.Store, port int, cancel context.CancelFunc, logger *s
 		cancel:     cancel,
 		logger:     logger,
 	}
-	mux.Handle("GET debug/pprof", s.authMiddleware(http.HandlerFunc(pprof.Index)))
-	mux.Handle("GET debug/pprof/profile", s.authMiddleware(http.HandlerFunc(pprof.Profile)))
+	mux.Handle("GET /debug/pprof/",  s.authMiddleware(http.HandlerFunc(pprof.Index)))
+	mux.Handle("GET /debug/pprof/profile", s.authMiddleware(http.HandlerFunc(pprof.Profile)))
 	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.Handle("GET /", http.HandlerFunc(s.handlerIndex))
 	mux.Handle("POST /api/login", s.authMiddleware(http.HandlerFunc(s.handlerLogin)))
